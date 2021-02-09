@@ -21,6 +21,7 @@
 #error "this library must be compiled with gcc"
 #endif
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,48 +37,108 @@ __attribute__((unused)) static const char *cvstag = "$backtrace$";
 
 #define BT_ADD_CR		(1)
 
-char **
-_backtrace_symbols(void *const *buffer, int depth, int add_cr)
+/*
+ * Output a line of the backtrace to either fd or memory.
+ */
+typedef int (*bt_out)(void *arg, const char *fmt, ...);
+
+struct bt_fd
 {
-	struct bt_frame		bt[BT_MAX_DEPTH];
-	char			*line[BT_MAX_DEPTH];
-	int			i, x;
-	char			**rv = NULL, *current;
-	char			*cr, *s;
-	size_t			sz, csz;
+	int	f_fd;
+};
+
+static int
+_backtrace_out_fd(void *arg, const char *fmt, ...)
+{
+	struct bt_fd *box = arg;
+	va_list ap;
+	int rv;
+
+	va_start(ap, fmt);
+	rv = vdprintf(box->f_fd, fmt, ap);
+	va_end(ap);
+	return rv;
+}
+
+struct bt_mem {
+	char	*m_line[BT_MAX_DEPTH];
+	size_t	 m_totalsz;
+	int	 m_count;
+};
+
+static int
+_backtrace_out_mem(void *arg, const char *fmt, ...)
+{
+	struct bt_mem *mem = arg;
+	va_list ap;
+	int rv;
+	char *line;
+
+	va_start(ap, fmt);
+	rv = vasprintf(&line, fmt, ap);
+	va_end(ap);
+	if (rv == -1)
+		return -1;
+	mem->m_totalsz += rv + 1;
+	mem->m_line[mem->m_count++] = line;
+	return 0;
+}
+
+static int
+_backtrace_symbols(void *const *buffer, int depth, int add_cr, bt_out out,
+    void *out_arg)
+{
+	struct bt_frame bt[BT_MAX_DEPTH];
+	int i;
+	char *cr, *s;
 
 	if (buffer == NULL || depth <= 0)
-		return (NULL);
+		return -1;
 
 	if (add_cr == BT_ADD_CR)
 		cr = "\n";
 	else
 		cr = "";
 
-	for (i = 0, sz = 0; i < depth; i++) {
+	for (i = 0; i < depth; i++) {
 		if (dladdr(buffer[i], &bt[i].bt_dlinfo) == 0) {
 			/* try something */
-			if (asprintf(&line[i], "%p%s",
+			if ((*out)(out_arg, "%p%s",
 			    buffer[i],
 			    cr) == -1)
-				goto unwind;
+				return -1;
 		} else {
 			s = (char *)bt[i].bt_dlinfo.dli_sname;
 			if (s == NULL)
 				s = "???";
-			if (asprintf(&line[i], "%p <%s+%ld> at %s%s",
+			if ((*out)(out_arg, "%p <%s+%ld> at %s%s",
 			    buffer[i],
 			    s,
 			    buffer[i] - bt[i].bt_dlinfo.dli_saddr,
 			    bt[i].bt_dlinfo.dli_fname,
 			    cr) == -1)
-				goto unwind;
+				return -1;
 		}
-		sz += strlen(line[i]) + 1;
 	}
+	return 0;
+}
+
+char **
+backtrace_symbols(void *const *buffer, int depth)
+{
+	struct bt_mem mem;
+	size_t csz, sz, szleft;
+	int i, x;
+	char **rv = NULL, *current;
+
+	mem.m_totalsz = 0;
+	mem.m_count = 0;
+	if (_backtrace_symbols(buffer, depth, 0, _backtrace_out_mem,
+	    &mem) == -1)
+		goto unwind;
 
 	/* adjust for array */
-	sz += depth * sizeof(char *);
+	sz = mem.m_totalsz + depth * sizeof(char *);
 
 	rv = malloc(sz);
 	if (rv == NULL)
@@ -86,8 +147,9 @@ _backtrace_symbols(void *const *buffer, int depth, int add_cr)
 	current = (char *)&rv[depth];
 	for (x = 0; x < depth; x++) {
 		rv[x] = current;
-		csz = strlcpy(current, line[x], sz - (current - (char *)rv));
-		if (csz >= sz) {
+		szleft = sz - (current - (char *)rv);
+		csz = strlcpy(current, mem.m_line[x], szleft);
+		if (csz >= szleft) {
 			free(rv);
 			rv = NULL;
 			goto unwind;
@@ -95,34 +157,18 @@ _backtrace_symbols(void *const *buffer, int depth, int add_cr)
 		current += csz + 1;
 	}
 unwind:
+	i = mem.m_count;
 	while (--i >= 0)
-		free(line[i]);
+		free(mem.m_line[i]);
 
 	return (rv);
-}
-
-char **
-backtrace_symbols(void *const *buffer, int depth)
-{
-	return (_backtrace_symbols(buffer, depth, 0));
 }
 
 void
 backtrace_symbols_fd(void *const *buffer, int depth, int fd)
 {
-	char			**strings;
-	size_t			sz;
-	int			i;
+	struct bt_fd box;
 
-	strings = _backtrace_symbols(buffer, depth, BT_ADD_CR);
-	if (strings == NULL)
-		return;
-
-	for (i = 0; i < depth; i++) {
-		sz = strlen(strings[i]);
-		if (write(fd, strings[i], sz) == -1)
-			return;
-	}
-
-	free(strings);
+	box.f_fd = fd;
+	_backtrace_symbols(buffer, depth, BT_ADD_CR, _backtrace_out_fd, &box);
 }
