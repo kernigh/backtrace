@@ -6,7 +6,7 @@ LIBDIR=${LOCALBASE}/lib
 
 #WANTLINT=
 LIB= backtrace
-SRCS= backtrace.c
+SRCS= backtrace.c amd64.S
 .if defined(${COMPILER_VERSION})  &&  ${COMPILER_VERSION:L} == "gcc4"
 CFLAGS+= -fdiagnostics-show-option -Wall -Werror
 .else
