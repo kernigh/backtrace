@@ -39,6 +39,7 @@ __attribute__((unused)) static const char *cvstag = "$backtrace$";
 
 /*
  * Output a line of the backtrace to either fd or memory.
+ * If an error occurs, returns < 0.
  */
 typedef int (*bt_out)(void *arg, const char *fmt, ...);
 
@@ -48,7 +49,7 @@ struct bt_fd
 };
 
 static int
-_backtrace_out_fd(void *arg, const char *fmt, ...)
+backtrace_out_fd(void *arg, const char *fmt, ...)
 {
 	struct bt_fd *box = arg;
 	va_list ap;
@@ -67,7 +68,7 @@ struct bt_mem {
 };
 
 static int
-_backtrace_out_mem(void *arg, const char *fmt, ...)
+backtrace_out_mem(void *arg, const char *fmt, ...)
 {
 	struct bt_mem *mem = arg;
 	va_list ap;
@@ -81,7 +82,7 @@ _backtrace_out_mem(void *arg, const char *fmt, ...)
 		return -1;
 	mem->m_totalsz += rv + 1;
 	mem->m_line[mem->m_count++] = line;
-	return 0;
+	return rv;
 }
 
 static int
@@ -105,7 +106,7 @@ _backtrace_symbols(void *const *buffer, int depth, int add_cr, bt_out out,
 			/* try something */
 			if ((*out)(out_arg, "%p%s",
 			    buffer[i],
-			    cr) == -1)
+			    cr) < 0)
 				return -1;
 		} else {
 			s = (char *)bt[i].bt_dlinfo.dli_sname;
@@ -116,7 +117,7 @@ _backtrace_symbols(void *const *buffer, int depth, int add_cr, bt_out out,
 			    s,
 			    buffer[i] - bt[i].bt_dlinfo.dli_saddr,
 			    bt[i].bt_dlinfo.dli_fname,
-			    cr) == -1)
+			    cr) < 0)
 				return -1;
 		}
 	}
@@ -133,7 +134,7 @@ backtrace_symbols(void *const *buffer, int depth)
 
 	mem.m_totalsz = 0;
 	mem.m_count = 0;
-	if (_backtrace_symbols(buffer, depth, 0, _backtrace_out_mem,
+	if (_backtrace_symbols(buffer, depth, 0, backtrace_out_mem,
 	    &mem) == -1)
 		goto unwind;
 
@@ -170,5 +171,5 @@ backtrace_symbols_fd(void *const *buffer, int depth, int fd)
 	struct bt_fd box;
 
 	box.f_fd = fd;
-	_backtrace_symbols(buffer, depth, BT_ADD_CR, _backtrace_out_fd, &box);
+	_backtrace_symbols(buffer, depth, BT_ADD_CR, backtrace_out_fd, &box);
 }
