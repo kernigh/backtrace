@@ -65,9 +65,10 @@ backtrace_out_fd(void *arg, const char *fmt, ...)
 }
 
 struct bt_mem {
-	char	*m_line[BT_MAX_DEPTH];
-	size_t	 m_totalsz;
-	int	 m_count;
+	char	**m_line;	/* array of lines */
+	size_t	  m_totalsz;	/* size of all lines with '\0's */
+	int	  m_count;	/* number of lines in array */
+	int	  m_cap;	/* capacity of array */
 };
 
 static int
@@ -75,8 +76,19 @@ backtrace_out_mem(void *arg, const char *fmt, ...)
 {
 	struct bt_mem *mem = arg;
 	va_list ap;
+	size_t newcap;
 	int rv;
-	char *line;
+	char *line, **newbuf;
+
+	if (mem->m_count == mem->m_cap) {
+		newcap = 2 * mem->m_cap;
+		newbuf = reallocarray(mem->m_line, newcap,
+		    sizeof(mem->m_line[0]));
+		if (newbuf == NULL)
+			return -1;
+		mem->m_line = newbuf;
+		mem->m_cap = newcap;
+	}
 
 	va_start(ap, fmt);
 	rv = vasprintf(&line, fmt, ap);
@@ -250,8 +262,8 @@ static int
 _backtrace_symbols(void *const *buffer, int depth, int add_cr, bt_out out,
     void *out_arg)
 {
-	struct bt_frame bt[BT_MAX_DEPTH];
 	struct bt_object obj;
+	Dl_info info;
 	int i;
 	char *cr, *s;
 
@@ -267,7 +279,7 @@ _backtrace_symbols(void *const *buffer, int depth, int add_cr, bt_out out,
 	obj.o_mapping = NULL;
 
 	for (i = 0; i < depth; i++) {
-		if (dladdr(buffer[i], &bt[i].bt_dlinfo) == 0) {
+		if (dladdr(buffer[i], &info) == 0) {
 			/* try something */
 			if ((*out)(out_arg, "%p%s",
 			    buffer[i],
@@ -277,15 +289,15 @@ _backtrace_symbols(void *const *buffer, int depth, int add_cr, bt_out out,
 			}
 		} else {
 			backtrace_cksymtab(&obj, (Elf_Addr)buffer[i],
-			    &bt[i].bt_dlinfo);
-			s = (char *)bt[i].bt_dlinfo.dli_sname;
+			    &info);
+			s = (char *)info.dli_sname;
 			if (s == NULL)
 				s = "???";
 			if ((*out)(out_arg, "%p <%s+%ld> at %s%s",
 			    buffer[i],
 			    s,
-			    buffer[i] - bt[i].bt_dlinfo.dli_saddr,
-			    bt[i].bt_dlinfo.dli_fname,
+			    buffer[i] - info.dli_saddr,
+			    info.dli_fname,
 			    cr) < 0) {
 				backtrace_unmapobj(&obj);
 				return -1;
@@ -304,6 +316,8 @@ backtrace_symbols(void *const *buffer, int depth)
 	int i, x;
 	char **rv = NULL, *current;
 
+	mem.m_cap = 32;
+	mem.m_line = reallocarray(NULL, mem.m_cap, sizeof(mem.m_line[0]));
 	mem.m_totalsz = 0;
 	mem.m_count = 0;
 	if (_backtrace_symbols(buffer, depth, 0, backtrace_out_mem,
