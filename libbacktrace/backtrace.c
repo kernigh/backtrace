@@ -21,15 +21,18 @@
 #error "this library must be compiled with gcc"
 #endif
 
+#include <sys/types.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+
+#include <dlfcn.h>
+#include <elf.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#include <sys/types.h>
-
-#include <dlfcn.h>
 
 #include "backtrace.h"
 
@@ -85,11 +88,170 @@ backtrace_out_mem(void *arg, const char *fmt, ...)
 	return rv;
 }
 
+/*
+ * We map an elf(5) object into memory to read its symbol table.  If
+ * o_fname isn't NULL but o_mapping is NULL, then we failed to map
+ * this object and find its symbol table.
+ */
+struct bt_object {
+	const char	*o_fname;
+	char		*o_mapping;
+	const Elf_Sym	*o_symtab;
+	const char	*o_strtab;
+	Elf_Off		 o_size;
+	Elf_Word	 o_symcount;
+	Elf_Word	 o_strtabsz;
+};
+
+static void
+backtrace_unmapobj(struct bt_object *obj)
+{
+	if (obj->o_mapping != NULL) {
+		munmap(obj->o_mapping, obj->o_size);
+		obj->o_mapping = NULL;
+	}
+}
+
+static void
+backtrace_mapobj(struct bt_object *obj, const char *fname)
+{
+	const Elf_Ehdr *ehdr;
+	const Elf_Shdr *shdr, *strtabhdr, *symtabhdr;
+	struct stat st;
+	size_t sz;
+	int fd, i;
+	char *mapping;
+
+	/* Remember that we tried to map this file. */
+	obj->o_fname = fname;
+
+	/*
+	 * Open and mmap this object.  Unfortunately, if we have a
+	 * relative path, and the program did chdir(2), then we won't
+	 * open the correct object.
+	 */
+	if ((fd = open(fname, O_RDONLY|O_NONBLOCK)) == -1)
+		return;
+	if (fstat(fd, &st) == -1 ||
+	    (sz = st.st_size) != st.st_size ||
+	    sz < sizeof(ehdr)) {
+		close(fd);
+		return;
+	}
+	mapping = mmap(NULL, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	if (mapping == MAP_FAILED)
+		return;
+
+	ehdr = (Elf_Ehdr *)&mapping[0];
+	if (!IS_ELF(*ehdr) ||
+	    ehdr->e_machine != ELF_TARG_MACH ||
+	    ehdr->e_shoff > sz ||
+	    ehdr->e_shoff + ehdr->e_shnum * sizeof(shdr[0]) > sz) {
+		munmap(mapping, sz);
+		return;
+	}
+
+	/*
+	 * Look for the symbol table, which is often almost the last
+	 * section.  Skip section 0; it's SHT_NULL.
+	 *
+	 * e_shnum can be 0 in an object with more than about 60k
+	 * sections.  We don't understand such objects.
+	 */
+	shdr = (Elf_Shdr *)&mapping[ehdr->e_shoff];
+	symtabhdr = NULL;
+	for (i = ehdr->e_shnum - 1; i >= 1; i--) {
+		if (shdr[i].sh_type == SHT_SYMTAB) {
+			symtabhdr = &shdr[i];
+			break;
+		}
+	}
+	if (symtabhdr == NULL ||
+	    symtabhdr->sh_offset > sz ||
+	    symtabhdr->sh_offset + symtabhdr->sh_size > sz) {
+		munmap(mapping, sz);
+		return;
+	}
+
+	/*
+	 * The symbol table links to a string table, which
+	 * must end with a '\0'.
+	 */
+	strtabhdr = &shdr[symtabhdr->sh_link];
+	if (symtabhdr->sh_link >= ehdr->e_shnum ||
+	    strtabhdr->sh_offset > sz ||
+	    strtabhdr->sh_offset + strtabhdr->sh_size > sz ||
+	    strtabhdr->sh_size == 0 ||
+	    mapping[strtabhdr->sh_offset + strtabhdr->sh_size - 1]
+	    != '\0') {
+		munmap(mapping, sz);
+		return;
+	}
+
+	/* This mapping looks good! */
+	obj->o_mapping = mapping;
+	obj->o_symtab = (Elf_Sym *)&mapping[symtabhdr->sh_offset];
+	obj->o_strtab = &mapping[strtabhdr->sh_offset];
+	obj->o_size = sz;
+	obj->o_symcount = symtabhdr->sh_size /
+	    sizeof(obj->o_symtab[0]);
+	obj->o_strtabsz = strtabhdr->sh_size;
+}
+
+/*
+ * Check the symbol table of the mapped object for a better symbol.
+ * The info from dlsym(3) refers to an exported symbol, but our addr
+ * might point into a function that wasn't exported.  (For example,
+ * main executables tend not to export their functions.)
+ *
+ * Change info->dli_saddr and info->dli_sname to refer to the better
+ * symbol if we find one.  If so, info->dli_sname will point into the
+ * mapped object.
+ */
+static void
+backtrace_cksymtab(struct bt_object *obj, Elf_Addr addr, Dl_info *info)
+{
+	const Elf_Sym *s;
+	Elf_Addr base, bestv, v;
+	Elf_Word i;
+	const char *bestn, *fname;
+
+	/* Keep our old mapping unless the fname pointer changed. */
+	if ((fname = info->dli_fname) != obj->o_fname) {
+		backtrace_unmapobj(obj);
+		backtrace_mapobj(obj, fname);
+	}
+
+	/* If we failed to map this object, do nothing. */
+	if (obj->o_mapping == NULL)
+		return;
+
+	/* Find the best symbol <= addr. */
+	base = (Elf_Addr)info->dli_fbase;
+	bestv = (Elf_Addr)info->dli_saddr;
+	bestn = info->dli_sname;
+	for (i = 0; i < obj->o_symcount; i++) {
+		s = &obj->o_symtab[i];
+		v = base + s->st_value;
+		if (bestv < v && v <= addr) {
+			bestv = v;
+			if (s->st_name < obj->o_strtabsz)
+				bestn = &obj->o_strtab[s->st_name];
+			else
+				bestn = "???";
+		}
+	}
+	info->dli_saddr = (void *)bestv;
+	info->dli_sname = bestn;
+}
+
 static int
 _backtrace_symbols(void *const *buffer, int depth, int add_cr, bt_out out,
     void *out_arg)
 {
 	struct bt_frame bt[BT_MAX_DEPTH];
+	struct bt_object obj;
 	int i;
 	char *cr, *s;
 
@@ -101,14 +263,21 @@ _backtrace_symbols(void *const *buffer, int depth, int add_cr, bt_out out,
 	else
 		cr = "";
 
+	obj.o_fname = NULL;
+	obj.o_mapping = NULL;
+
 	for (i = 0; i < depth; i++) {
 		if (dladdr(buffer[i], &bt[i].bt_dlinfo) == 0) {
 			/* try something */
 			if ((*out)(out_arg, "%p%s",
 			    buffer[i],
-			    cr) < 0)
+			    cr) < 0) {
+				backtrace_unmapobj(&obj);
 				return -1;
+			}
 		} else {
+			backtrace_cksymtab(&obj, (Elf_Addr)buffer[i],
+			    &bt[i].bt_dlinfo);
 			s = (char *)bt[i].bt_dlinfo.dli_sname;
 			if (s == NULL)
 				s = "???";
@@ -117,10 +286,13 @@ _backtrace_symbols(void *const *buffer, int depth, int add_cr, bt_out out,
 			    s,
 			    buffer[i] - bt[i].bt_dlinfo.dli_saddr,
 			    bt[i].bt_dlinfo.dli_fname,
-			    cr) < 0)
+			    cr) < 0) {
+				backtrace_unmapobj(&obj);
 				return -1;
+			}
 		}
 	}
+	backtrace_unmapobj(&obj);
 	return 0;
 }
 
