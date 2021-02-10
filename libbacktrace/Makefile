@@ -14,7 +14,6 @@ CFLAGS+= -Wall -Werror
 .endif
 CFLAGS+= -ggdb3
 CFLAGS+= -I${LOCALBASE}/include
-LDFLAGS+= -Wl,--export-dynamic
 HDRS= backtrace.h
 
 MAN= backtrace.3

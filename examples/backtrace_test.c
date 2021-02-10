@@ -32,7 +32,7 @@ f2(void)
 	void			*bt[BT_MAX_DEPTH];
 	int			fd, d;
 
-	fd = open("mybacktrace", O_CREAT | O_WRONLY, 0600);
+	fd = open("mybacktrace", O_CREAT | O_WRONLY | O_TRUNC, 0600);
 	if (fd == -1)
 		err(1, "open");
 
