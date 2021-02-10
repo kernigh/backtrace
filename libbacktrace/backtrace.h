@@ -16,17 +16,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifndef __GNUC__
-#error "this library must be compiled with gcc"
-#endif
-
-#define BT_MAX_DEPTH            (128)
-
-struct bt_frame {
-	Dl_info			bt_dlinfo;
-	unsigned int		line;
-};
-
 /* compatability functions with libexecinfo and glibc */
 int			backtrace(void **, int);
 char			**backtrace_symbols(void *const *, int);

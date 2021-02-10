@@ -1,4 +1,3 @@
-/* $backtrace$ */
 /*
  * Copyright (c) 2010 Marco Peereboom <marco@conformal.com>
  * Copyright (c) 2010 Conformal Systems LLC <info@conformal.com>
@@ -17,10 +16,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifndef __GNUC__
-#error "this library must be compiled with gcc"
-#endif
-
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -35,8 +30,6 @@
 #include <unistd.h>
 
 #include "backtrace.h"
-
-__attribute__((unused)) static const char *cvstag = "$backtrace$";
 
 #define BT_ADD_CR		(1)
 

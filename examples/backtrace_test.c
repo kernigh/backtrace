@@ -1,4 +1,3 @@
-/* $backtrace$ */
 /*
  * Copyright (c) 2010 Marco Peereboom <marco@conformal.com>
  * Copyright (c) 2010 Conformal Systems LLC <info@conformal.com>
@@ -25,6 +24,8 @@
 #include <unistd.h>
 
 #include "backtrace.h"
+
+#define BT_MAX_DEPTH            (128)
 
 void
 f2(void)
